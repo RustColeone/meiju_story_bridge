@@ -1,0 +1,4 @@
+config.yml
+__pycache__/
+*.pyc
+vector_store.db
