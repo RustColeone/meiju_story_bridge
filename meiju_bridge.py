@@ -10,6 +10,7 @@ import re
 import requests
 import json
 import os
+import logging
 
 try:
     import pychrome
@@ -17,15 +18,16 @@ except ImportError:
     print("⚠️ pychrome not installed. Run: pip install pychrome")
     pychrome = None
 
-from bridgeBase import BridgedObject
-
 try:
     import psutil
 except ImportError:
     psutil = None
 
 
-class MeijuBridge(BridgedObject):
+logging.getLogger("pychrome.tab").setLevel(logging.CRITICAL)
+
+
+class MeijuBridge:
     """
     Bridge for 妹居物语 using Chrome DevTools Protocol.
     
@@ -45,7 +47,8 @@ class MeijuBridge(BridgedObject):
     # ===========================
     
     def __init__(self, channel_id: str):
-        super().__init__(channel_id)
+        self.channel_id = channel_id
+        self.listen_mode = False
         self.browser = None
         self.tab = None
         self.connected = False
@@ -57,6 +60,14 @@ class MeijuBridge(BridgedObject):
         
         if pychrome is None:
             print("[MeijuBridge] ERROR: pychrome not installed")
+
+    def set_listen_mode(self, enabled: bool):
+        """Enable/disable listen mode (used by parser/session layer)."""
+        self.listen_mode = enabled
+
+    def is_listening(self) -> bool:
+        """Check if listen mode is enabled."""
+        return self.listen_mode
 
     def _probe_cdp_version(self, port: int, timeout: float = 1.0) -> Optional[dict]:
         """Return /json/version payload if a valid CDP endpoint exists on this port."""
@@ -152,6 +163,54 @@ class MeijuBridge(BridgedObject):
             return discovered
 
         return None
+
+    def _score_tab_candidate(self, tab_info: dict) -> int:
+        """Score tab candidate; higher score means more likely to be the game tab."""
+        title = (tab_info.get('title') or '').strip().lower()
+        tab_url = (tab_info.get('url') or '').strip().lower()
+
+        score = 0
+
+        if 'devtools' in tab_url:
+            return -10_000
+
+        if '妹居物语' in (tab_info.get('title') or ''):
+            score += 100
+        if 'meijustory' in title:
+            score += 90
+        if 'urban-friendship-story' in title:
+            score += 80
+
+        if 'app.asar' in tab_url:
+            score += 50
+        if 'steamapps/common/meijustory' in tab_url:
+            score += 40
+        if 'launcher.html' in tab_url:
+            score -= 10
+
+        if title:
+            score += 1
+
+        return score
+
+    def _select_game_tab(self, tabs_data: list[dict]) -> Optional[dict]:
+        """Select the best game tab, prioritizing titles containing 妹居物语."""
+        if not tabs_data:
+            return None
+
+        ranked = sorted(tabs_data, key=self._score_tab_candidate, reverse=True)
+
+        # Prefer strong matches first
+        for candidate in ranked:
+            if self._score_tab_candidate(candidate) >= 90:
+                return candidate
+
+        # Fallback: best non-devtools tab
+        for candidate in ranked:
+            if 'devtools' not in ((candidate.get('url') or '').lower()):
+                return candidate
+
+        return ranked[0]
     
     
     async def initialize(self) -> bool:
@@ -193,20 +252,17 @@ class MeijuBridge(BridgedObject):
             
             print(f"[MeijuBridge] Found {len(tabs_data)} tab(s)")
             
-            # Find the game tab (first non-DevTools tab)
-            game_tab_data = None
+            # Find the best game tab candidate
             for tab_info in tabs_data:
                 title = tab_info.get('title', '')
                 tab_url = tab_info.get('url', '')
                 print(f"[MeijuBridge]   - Tab: {title} ({tab_url})")
-                
-                # Skip DevTools tabs
-                if 'devtools' not in tab_url.lower():
-                    game_tab_data = tab_info
-                    break
-            
+
+            game_tab_data = self._select_game_tab(tabs_data)
             if not game_tab_data:
-                game_tab_data = tabs_data[0]
+                print("[MeijuBridge] ❌ Failed to select a game tab")
+                self.last_status_message = "❌ Failed to select game tab"
+                return False
             
             # Get WebSocket URL
             ws_url = game_tab_data.get('webSocketDebuggerUrl')
@@ -237,15 +293,27 @@ class MeijuBridge(BridgedObject):
             print("[MeijuBridge] Make sure game is running with: --remote-debugging-port=9222 --user-data-dir=<custom_folder>")
             self.active_cdp_port = None
             return False
+
+    async def _ensure_connection(self) -> bool:
+        """Ensure current tab websocket is alive; reconnect if it dropped."""
+        if not self.connected or self.tab is None:
+            return await self.initialize()
+
+        try:
+            self.tab.Runtime.evaluate(expression="1+1")
+            return True
+        except Exception as e:
+            print(f"[MeijuBridge] ⚠️ CDP tab connection lost, reinitializing... ({e})")
+            await self.disconnect()
+            return await self.initialize()
     
     async def calibrate(self) -> bool:
         """
         CDP version doesn't need calibration.
         This method inspects the DOM to help you find selectors.
         """
-        if not self.connected:
-            if not await self.initialize():
-                return False
+        if not await self._ensure_connection():
+            return False
         
         print("[MeijuBridge] 🔍 Inspecting DOM structure...")
         
@@ -311,9 +379,8 @@ class MeijuBridge(BridgedObject):
         Returns:
             Status message
         """
-        if not self.connected:
-            if not await self.initialize():
-                return "❌ Not connected to game"
+        if not await self._ensure_connection():
+            return "❌ Not connected to game"
         
         try:
             js_code = """
@@ -421,6 +488,7 @@ class MeijuBridge(BridgedObject):
             return (is_story, dialogue if dialogue else None, has_dialogue, has_input)
         
         except Exception as e:
+            self.connected = False
             return (False, None, False, False)
     
     async def story_continue(self) -> str:
@@ -472,6 +540,7 @@ class MeijuBridge(BridgedObject):
                 self.tab.stop()
             except:
                 pass
+        self.tab = None
         self.connected = False
         self.active_cdp_port = None
         print("[MeijuBridge] Disconnected from CDP")
@@ -493,9 +562,8 @@ class MeijuBridge(BridgedObject):
         """
         Get game information by reading the DOM.
         """
-        if not self.connected:
-            if not await self.initialize():
-                return "❌ Not connected to game"
+        if not await self._ensure_connection():
+            return "❌ Not connected to game"
         
         try:
             # Execute JavaScript to extract game info from specific IDs
@@ -540,9 +608,8 @@ class MeijuBridge(BridgedObject):
         Returns:
             Diary entry text or error message
         """
-        if not self.connected:
-            if not await self.initialize():
-                return "❌ Not connected to game"
+        if not await self._ensure_connection():
+            return "❌ Not connected to game"
         
         try:
             print(f"[MeijuBridge] Getting diary entry {index}...")
@@ -625,9 +692,8 @@ class MeijuBridge(BridgedObject):
         Send a message using CDP by manipulating DOM.
         Automatically detects story mode and uses appropriate input.
         """
-        if not self.connected:
-            if not await self.initialize():
-                return "❌ Not connected to game"
+        if not await self._ensure_connection():
+            return "❌ Not connected to game"
         
         try:
             # Dismiss any popups first (like diary notifications)
@@ -733,9 +799,8 @@ class MeijuBridge(BridgedObject):
         Trigger the persistent greeting button ("让Yuki先说") so Yuki starts first.
         Intended for normal chat mode.
         """
-        if not self.connected:
-            if not await self.initialize():
-                return "❌ Not connected to game"
+        if not await self._ensure_connection():
+            return "❌ Not connected to game"
 
         try:
             await self._dismiss_modals()
@@ -829,12 +894,39 @@ class MeijuBridge(BridgedObject):
             return []
         except Exception:
             return []
+
+    async def get_recent_conversation(self, limit: int = 4) -> list[dict[str, str]]:
+        """Return recent structured conversation items from chat history."""
+        if limit <= 0:
+            return []
+
+        if not await self._ensure_connection():
+            return []
+
+        msgs = await self._get_chat_messages()
+        if not msgs:
+            return []
+
+        cleaned = []
+        for item in msgs:
+            sender = str(item.get('sender', '')).strip()
+            content = str(item.get('content', '')).strip()
+            if not content:
+                continue
+            cleaned.append({"sender": sender, "content": content})
+
+        if not cleaned:
+            return []
+
+        return cleaned[-limit:]
     
     async def _wait_for_reply(self, sent_text: str, before_text: str, before_count: int = 0) -> str:
         """Wait for Yuki's reply"""
         phase_timeout = self.poll_timeout
         sent_text_norm = self._norm(sent_text).strip()
         sent_text_flat = sent_text_norm.replace("\n", " ").replace("\r", " ").strip()
+        before_text_norm = self._norm(before_text)
+        baseline_reply = self._extract_last_yuki(before_text)
 
         # A) Wait for our message to appear
         start = time.time()
@@ -858,7 +950,7 @@ class MeijuBridge(BridgedObject):
             if (
                 (sent_text_norm and sent_text_norm in chat_norm)
                 or (sent_text_flat and sent_text_flat in chat_flat)
-                or (chat != before_text and len(chat_norm.strip()) > len(self._norm(before_text).strip()))
+                or (chat_norm != before_text_norm and len(chat_norm.strip()) > len(before_text_norm.strip()))
             ):
                 break
             await asyncio.sleep(self.POLL_INTERVAL)
@@ -869,15 +961,19 @@ class MeijuBridge(BridgedObject):
         start = time.time()
         while time.time() - start < phase_timeout:
             msgs = await self._get_chat_messages()
-            if msgs:
+            if msgs and len(msgs) > before_count:
                 sender = (msgs[-1].get('sender') or '').strip().lower()
                 if sender.startswith('yuki'):
-                    break
+                    candidate = self._clean_yuki_reply(msgs[-1].get('content', ''))
+                    if candidate and candidate != baseline_reply:
+                        break
 
             chat = await self._get_chat_text()
-            sp = self._get_last_speaker(chat)
-            if sp == "yuki":
-                break
+            chat_norm = self._norm(chat)
+            if chat_norm != before_text_norm:
+                extracted = self._extract_last_yuki(chat)
+                if extracted and extracted != baseline_reply:
+                    break
             await asyncio.sleep(self.POLL_INTERVAL)
         else:
             return ""
@@ -890,15 +986,21 @@ class MeijuBridge(BridgedObject):
             reply = ""
 
             msgs = await self._get_chat_messages()
-            if msgs:
+            if msgs and len(msgs) > before_count:
                 last = msgs[-1]
                 sender = (last.get('sender') or '').strip().lower()
                 if sender.startswith('yuki'):
-                    reply = self._clean_yuki_reply(last.get('content', ''))
+                    candidate = self._clean_yuki_reply(last.get('content', ''))
+                    if candidate != baseline_reply:
+                        reply = candidate
 
             if not reply:
                 chat = await self._get_chat_text()
-                reply = self._extract_last_yuki(chat)
+                chat_norm = self._norm(chat)
+                if chat_norm != before_text_norm:
+                    candidate = self._extract_last_yuki(chat)
+                    if candidate != baseline_reply:
+                        reply = candidate
 
             if reply and reply != last_reply:
                 last_reply = reply
