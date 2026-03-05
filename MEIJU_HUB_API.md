@@ -1,6 +1,6 @@
-# MeijuBridge API (Black-Box Reference)
+# MeijuHub API (Black-Box Reference)
 
-This document describes `MeijuBridge` as a **single-file library interface**.
+This document describes `MeijuBridge` from `meiju_hub.py` as a **single-file library interface**.
 Treat the implementation as a black box: call methods, read returns, and orchestrate platform logic (Discord/Telegram/etc.) around it.
 
 ---
@@ -219,6 +219,28 @@ Returns:
 
 ---
 
+## `await get_recent_conversation(limit: int = 4) -> list[dict[str, str]]`
+
+Purpose:
+- Read the most recent messages from the visible chat history DOM.
+
+Input:
+- `limit: int` — max number of recent messages to return (default `4`)
+
+Returns:
+- List of `{"sender": str, "content": str}` dicts, oldest-first, up to `limit` entries
+- Empty list `[]` if not connected, no DOM messages, or on error
+
+Sender values (by convention):
+- `"Yuki"` (or variant) for game character dialogue
+- Player/user text for human messages
+
+Usage note:
+- Intended for platform adapters to detect and sync unseen context before forwarding a new reply.
+- Empty entries (blank content) are filtered out automatically.
+
+---
+
 ## 4) Suggested host-platform orchestration (Telegram/others)
 
 `MeijuBridge` is pull-based. Host code should implement an adapter loop.
@@ -276,7 +298,7 @@ If game UI updates break behavior, run `await calibrate()` and diff selectors.
 
 ```python
 import asyncio
-from meiju_bridge import MeijuBridge
+from meiju_hub import MeijuBridge
 
 async def run_bridge_loop(platform_send, platform_get_user_text):
     bridge = MeijuBridge("telegram-chat-123")
@@ -332,7 +354,7 @@ This file is intentionally focused on **input/output contracts** so platform ada
 
 ---
 
-## 8) Command-layer behavior (bridgeParser/main)
+## 8) Command-layer behavior (bridgeParser / session_manager / main_discord)
 
 If you use the bundled command layer (`$bridge ...`) on top of `MeijuBridge`, current behavior includes:
 
@@ -356,3 +378,18 @@ If you use the bundled command layer (`$bridge ...`) on top of `MeijuBridge`, cu
 - Multi-flag execution:
   - Multiple flags can be combined in one command and run in order.
   - Example: `$bridge -m "hello" --calibration`
+
+- Story mode at startup:
+  - After `--init` succeeds, `check_story_mode()` is called automatically.
+  - If the game launched into story mode, a `pending_story_at_init` flag is set.
+  - The **first `$bridge` command** from any channel (regardless of type) triggers an
+    instant notification to that channel and auto-starts the story listener.
+  - This prevents users from accidentally injecting text into the game while it is
+    mid-story without any visible warning.
+
+- `--continue` safety:
+  - If the game is already in story mode when `--continue` is issued, the story
+    listener is started immediately without clicking the continue button
+    (avoids double-advancing narrative).
+  - If calling `story_continue()` causes a story mode transition, the listener
+    is auto-started after the call completes.

@@ -2,7 +2,7 @@
 Platform abstraction layer.
 
 This is the extension point for messaging app integrations (Discord, Telegram, etc.).
-`meiju_bridge.py` is the fixed destination/core.
+`meiju_hub.py` is the fixed destination/core.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass

@@ -1,10 +1,10 @@
 """
-Bridge command parser for meiju_bridge.py
+Bridge command parser for meiju_hub.py
 Handles commands like: $bridge send <text>, $bridge --init, etc.
 """
 import shlex
 
-from meiju_bridge import MeijuBridge
+from meiju_hub import MeijuBridge
 
 
 def parse_bridge_command(message_content: str, bridge_instances: dict, channel_id: str):

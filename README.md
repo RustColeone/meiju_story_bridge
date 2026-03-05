@@ -2,13 +2,13 @@
 
 Core CDP bridge library for **妹居物语 (Meiju Story)**, with a Discord adapter example.
 
-The main idea of this repo is `meiju_bridge.py` (game bridge API). Files like `main.py` and `bridgeParser.py` show one implementation example for Discord.
+The main idea of this repo is `meiju_hub.py` (game bridge API). Files like `main.py` and `bridgeParser.py` show one implementation example for Discord.
 
 ## What is Core vs Example
 
 ### Core
 
-- [meiju_bridge.py](meiju_bridge.py): reusable bridge to control/read the game through Chrome DevTools Protocol
+- [meiju_hub.py](meiju_hub.py): reusable bridge to control/read the game through Chrome DevTools Protocol
 - [MEIJU_BRIDGE_API.md](MEIJU_BRIDGE_API.md): black-box API reference for integrating into any platform (Discord/Telegram/custom UI)
 
 ### Discord Example Adapter
@@ -19,7 +19,7 @@ The main idea of this repo is `meiju_bridge.py` (game bridge API). Files like `m
 ## Features
 
 - CDP-based game control (no image/OCR automation)
-- Platform-agnostic bridge API (`meiju_bridge.py`) usable outside Discord
+- Platform-agnostic bridge API (`meiju_hub.py`) usable outside Discord
 - Discord bot command interface example (`$bridge ...`)
 - Story mode detection with state badges:
   - dialogue auto-forward
@@ -35,7 +35,7 @@ The main idea of this repo is `meiju_bridge.py` (game bridge API). Files like `m
 - Python 3.10+
 - 妹居物语 launched with remote debugging enabled
 
-If you only use `meiju_bridge.py` in your own app, Discord token/setup is not required.
+If you only use `meiju_hub.py` in your own app, Discord token/setup is not required.
 
 Python packages are listed in [requirements.txt](requirements.txt).
 
@@ -150,7 +150,7 @@ When story mode is detected, the bot:
 
 ## Project Files
 
-- [meiju_bridge.py](meiju_bridge.py): **core** CDP bridge implementation
+- [meiju_hub.py](meiju_hub.py): **core** CDP bridge implementation
 - [MEIJU_BRIDGE_API.md](MEIJU_BRIDGE_API.md): **core** API contract reference
 - [main.py](main.py): Discord adapter example
 - [bridgeParser.py](bridgeParser.py): Discord command parsing + aliases
