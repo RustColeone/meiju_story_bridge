@@ -38,6 +38,11 @@ class BridgeSessionManager:
         self.channel_send_busy: Dict[str, bool] = {}
         self.channel_locks: Dict[str, asyncio.Lock] = {}
         self.channel_known_history: Dict[str, set[str]] = {}
+        # Set to True by startup_auto_init_loop if story mode was detected at init time.
+        # Consumed by the first handle_bridge_command call so the user gets notified.
+        self.pending_story_at_init: bool = False
+        self._pending_story_dialogue: Optional[str] = None
+        self._pending_story_has_input: bool = False
 
     def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
         lock = self.channel_locks.get(channel_id)
@@ -264,6 +269,17 @@ class BridgeSessionManager:
                 success = await bridge.initialize()
                 if success:
                     print("[Auto Init] ✅ Bridge initialized successfully")
+                    # Check if game is already in story mode so the first channel
+                    # to interact gets notified immediately.
+                    try:
+                        is_story, dialogue, _, has_input = await bridge.check_story_mode()
+                        if is_story:
+                            self.pending_story_at_init = True
+                            self._pending_story_dialogue = dialogue
+                            self._pending_story_has_input = has_input
+                            print("[Auto Init] ⚠️ Game is in story mode — will notify first active channel")
+                    except Exception as e:
+                        print(f"[Auto Init] Could not check story mode: {e}")
                     return
 
                 print("[Auto Init] ❌ Init failed, retrying in 10s...")
@@ -439,9 +455,48 @@ class BridgeSessionManager:
         elif action_type == "continue":
             print(f"[{msg_channel}] {self.get_bot_name()}: {result_text}")
             await self.send_text(target, result_text)
-            result = await bridge.story_continue()
-            print(f"[{msg_channel}] {self.get_bot_name()}: {result}")
-            await self.send_text(target, result)
+
+            # Check if game is ALREADY in story mode (e.g. launched into a story scene).
+            # In that case, skip calling story_continue() and just start the listener.
+            try:
+                is_story, dialogue, has_dialogue, has_input = await bridge.check_story_mode()
+            except Exception as e:
+                print(f"[{msg_channel}] Error checking story mode for continue: {e}")
+                is_story, dialogue, has_dialogue, has_input = False, None, False, False
+
+            if is_story and not self.story_listeners.get(channel_id):
+                # Game is already mid-story — start listener immediately without clicking
+                story_msg = "📖 **Game is already in Story Mode!**\nStarting auto-forwarding...\n\n"
+                if dialogue:
+                    story_msg += dialogue
+                elif has_input:
+                    story_msg += "💬 Waiting for your response input..."
+                else:
+                    story_msg += "⏳ Yuki is thinking..."
+                story_msg += "\n\n" + self.STORY_INPUT_HELP
+                print(f"[{msg_channel}] Story mode already active — starting listener")
+                await self.send_text(target, story_msg)
+                self.story_listeners[channel_id] = True
+                self.schedule_task(self.story_mode_listener(channel_id, bridge, initial_dialogue=dialogue or ""))
+            elif is_story:
+                # Listener already running, nothing to do
+                await self.send_text(target, "📖 Story listener is already active.")
+            else:
+                # Not in story mode — execute one continue step
+                result = await bridge.story_continue()
+                print(f"[{msg_channel}] {self.get_bot_name()}: {result}")
+                await self.send_text(target, result)
+
+                # After the continue step, check if we entered story mode
+                try:
+                    is_story, dialogue, has_dialogue, has_input = await bridge.check_story_mode()
+                    if is_story and not self.story_listeners.get(channel_id):
+                        self.story_listeners[channel_id] = True
+                        self.schedule_task(
+                            self.story_mode_listener(channel_id, bridge, initial_dialogue=dialogue or "")
+                        )
+                except Exception as e:
+                    print(f"[{msg_channel}] Error checking story mode after continue: {e}")
 
         elif action_type == "greet":
             print(f"[{msg_channel}] {self.get_bot_name()}: {result_text}")
@@ -499,6 +554,46 @@ class BridgeSessionManager:
             print(f"[{msg_channel}] {self.get_bot_name()}: {unknown_msg}")
             await self.send_text(target, unknown_msg)
 
+    async def _check_pending_story_at_init(self, target: Any, msg_channel: str, channel_id: str, bridge: Any):
+        """If game was in story mode at startup, notify channel and start listener on first command."""
+        if not self.pending_story_at_init:
+            return
+        if self.story_listeners.get(channel_id):
+            self.pending_story_at_init = False  # Already handled for another channel
+            return
+        if not (bridge and getattr(bridge, "connected", False)):
+            return
+
+        self.pending_story_at_init = False
+        dialogue = self._pending_story_dialogue
+        has_input = self._pending_story_has_input
+
+        # Re-check in case state changed since init
+        try:
+            is_story, dialogue, _, has_input = await bridge.check_story_mode()
+        except Exception:
+            is_story = True  # Assume still in story mode if check fails
+
+        if not is_story:
+            return
+
+        story_msg = (
+            "⚠️ **Game was already in Story Mode when the bot started!**\n"
+            "Auto-forwarding dialogue...\n\n"
+        )
+        if dialogue:
+            story_msg += dialogue
+        elif has_input:
+            story_msg += "💬 Waiting for your response input..."
+        else:
+            story_msg += "⏳ Yuki is thinking..."
+        story_msg += "\n\n" + self.STORY_INPUT_HELP
+
+        print(f"[{msg_channel}] Notifying channel: game was in story mode at startup")
+        await self.send_text(target, story_msg)
+        self.story_listeners[channel_id] = True
+        self.schedule_task(self.story_mode_listener(channel_id, bridge, initial_dialogue=dialogue or ""))
+
     async def handle_bridge_command(self, target: Any, msg_channel: str, channel_id: str, content: str):
         async with self._get_channel_lock(channel_id):
             parse_result = self.parse_bridge_command(content, self.bridge_instances, channel_id)
@@ -508,6 +603,10 @@ class BridgeSessionManager:
             else:
                 result_text, action_type, bridge = parse_result
                 extra = None
+
+            # Proactively notify if game was in story mode when the bot first started.
+            # Runs on the very first command from this channel.
+            await self._check_pending_story_at_init(target, msg_channel, channel_id, bridge)
 
             if action_type == "multi":
                 for sub_result_text, sub_action_type, sub_extra in (extra or []):
