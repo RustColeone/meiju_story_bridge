@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 
@@ -63,6 +64,11 @@ class BridgeSessionManager:
         return s.startswith("yuki")
 
     @staticmethod
+    def _strip_all_whitespace(text: str) -> str:
+        """Remove ALL whitespace characters (spaces, newlines, tabs, etc.)."""
+        return re.sub(r'\s+', '', (text or ""))
+
+    @staticmethod
     def _truncate_player_text(text: str, limit: int = 100) -> str:
         t = (text or "").strip()
         if len(t) <= limit:
@@ -104,7 +110,11 @@ class BridgeSessionManager:
             return ""
 
         known = self.channel_known_history.setdefault(channel_id, set())
-        normalized_current_player = self._truncate_player_text(current_player_text, 100)
+        # Strip ALL whitespace so Discord \n, collapsed spaces, and DOM truncation
+        # differences don't cause a false mismatch.
+        # We use a 60-char prefix for the match so even a DOM-truncated entry still hits.
+        MATCH_PREFIX = 60
+        stripped_current = self._strip_all_whitespace(current_player_text)[:MATCH_PREFIX]
 
         needs_sync = False
         for x in context:
@@ -112,10 +122,11 @@ class BridgeSessionManager:
             content = x.get("content", "")
             key = self._history_key(sender, content)
 
-            # The immediate current user input (C) is expected to be new and should not
-            # by itself trigger context-sync on every turn.
-            if (not self._is_yuki_sender(sender)) and normalized_current_player:
-                if self._truncate_player_text(content, 100) == normalized_current_player:
+            # Skip the current player input (C) so it never triggers a sync on its own.
+            # Compare fully-stripped prefixes so \n, spaces, and DOM truncations all match.
+            if (not self._is_yuki_sender(sender)) and stripped_current:
+                stripped_content = self._strip_all_whitespace(content)[:MATCH_PREFIX]
+                if stripped_content == stripped_current or stripped_current.startswith(stripped_content) or stripped_content.startswith(stripped_current):
                     continue
 
             if key not in known:
